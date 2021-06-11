@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset=utf-8>
+    <title>My first three.js app</title>
+    <style>
+        body {
+            margin: 0;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%
+        }
+    </style>
+</head>
+
+<body>
+    <script src="js/three.min.js"></script>
+    <script src="js/FirstPersonControls.js"></script>
+    <script src="js/socket.io.js"></script>
+    <script src="js/GLTFLoader.js"></script>
+    <script>
+        // Our Javascript will go here.
+        const socket = io('ws://localhost:3000');
+        const scene = new THREE.Scene();
+        const SCREEN_WIDTH = window.innerWidth, SCREEN_HEIGHT = window.innerHeight;
+        const VIEW_ANGLE = 45, ASPECT = SCREEN_WIDTH / SCREEN_HEIGHT, NEAR = 0.3, FAR = 1000;
+        const camera = new THREE.PerspectiveCamera(VIEW_ANGLE, ASPECT, NEAR, FAR);
+        camera.position.set(0, 20, 50);
+        camera.lookAt(new THREE.Vector3(0, 15, 0));
+        scene.add(camera);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(SCREEN_WIDTH, SCREEN_HEIGHT);
+        document.body.appendChild(renderer.domElement);
+
+        // 修改fpc的构造，传入参数camera
+        const fpc = new FirstPersonControls(camera);
+        fpc.connect();
+        // 向场景添加用于控制相机的Object
+        scene.add(fpc.yawObject);
+        let clock = new THREE.Clock();
+
+        function render() {
+            fpc.update(clock.getDelta());
+            socket.emit('player', { position: fpc.yawObject.position, rotation: fpc.yawObject.rotation });
+            requestAnimationFrame(render);
+            renderer.render(scene, camera);
+            RaycastCheck()
+        }
+
+
+
+        // soft white light
+        const light = new THREE.AmbientLight(0xaaaaaa);
+        scene.add(light);
+
+        // 首先创建一个盒子立方体，长宽高设为500
+        const skyBoxGeometry = new THREE.BoxGeometry(500, 500, 500);
+
+        // 接下来创建材质并映射到指定图片，设定为只渲染背面（对立方体来说，从外面看到的是正面，从内部看到的是背面）
+        const textureLoader = new THREE.TextureLoader();
+        const skyBoxMaterial = [
+            new THREE.MeshBasicMaterial({ map: textureLoader.load('./assets/textures/skybox/px.jpg'), side: THREE.BackSide }), // right
+            new THREE.MeshBasicMaterial({ map: textureLoader.load('./assets/textures/skybox/nx.jpg'), side: THREE.BackSide }), // left
+            new THREE.MeshBasicMaterial({ map: textureLoader.load('./assets/textures/skybox/py.jpg'), side: THREE.BackSide }), // top
+            new THREE.MeshBasicMaterial({ map: textureLoader.load('./assets/textures/skybox/ny.jpg'), side: THREE.BackSide }), // bottom
+            new THREE.MeshBasicMaterial({ map: textureLoader.load('./assets/textures/skybox/pz.jpg'), side: THREE.BackSide }), // back
+            new THREE.MeshBasicMaterial({ map: textureLoader.load('./assets/textures/skybox/nz.jpg'), side: THREE.BackSide })  // front
+        ];
+
+        // 创建天空盒子并添加到场景
+        const skyBox = new THREE.Mesh(skyBoxGeometry, skyBoxMaterial);
+        scene.add(skyBox);
+
+        textureLoader.load("./assets/textures/floor/FloorsCheckerboard_S_Diffuse.jpg", function (texture) {
+            texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+            texture.repeat.set(4, 4);
+            const floorMaterial = new THREE.MeshBasicMaterial({
+                map: texture,
+                side: THREE.DoubleSide
+            });
+            const floorGeometry = new THREE.PlaneGeometry(500, 500, 5, 5);
+            const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+            floor.position.y = 0;
+            floor.rotation.x = Math.PI / 2;
+            scene.add(floor);
+        })
+
+        window.addEventListener("resize", onWindowResize);
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+
+        let playerMap = new Map();
+        socket.on('player', data => {
+            if (playerMap.has(data.socketid)) {
+                let model = playerMap.get(data.socketid);
+                model.position.set(data.position.x, data.position.y, data.position.z);
+                model.rotation.set(data.rotation._x, data.rotation._y + Math.PI / 2, data.rotation._z);
+            } else {
+                socket.emit('player', { position: fpc.yawObject.position, rotation: fpc.yawObject.rotation });
+                const loader = new THREE.GLTFLoader();
+                loader.load("./assets/models/duck.glb", (mesh) => {
+                    //如果这个判断注释掉会怎么样，为什么
+                    if (!playerMap.has(data.socketid)) {
+                        mesh.scene.scale.set(10, 10, 10);
+                        scene.add(mesh.scene);
+                        playerMap.set(data.socketid, mesh.scene);
+                        let model = playerMap.get(data.socketid);
+                    }
+                });
+            }
+        });
+
+        socket.on('offline', data => {
+            if (playerMap.has(data.socketid)) {
+                scene.remove(playerMap.get(data.socketid));
+                playerMap.delete(data.socketid)
+            }
+        });
+
+        function RaycastCheck() {
+            for (var a of playerMap) {
+                var crash = false;
+                var originPoint = a[1].position.clone();
+                for (var vertexIndex = 0; vertexIndex < a[1].geometry.vertices.length; vertexIndex++) {
+                    // 顶点原始坐标
+                    var localVertex = a[1].geometry.vertices[vertexIndex].clone();
+                    // 顶点经过变换后的坐标
+                    var globalVertex = localVertex.applyMatrix4(a[1].matrix);
+                    var directionVector = globalVertex.sub(a[1].position);
+                    var ray = new THREE.Raycaster(originPoint, directionVector.clone().normalize());
+                    var collisionResults = ray.intersectObjects(collideMeshList);
+                    if (collisionResults.length > 0 && collisionResults[0].distance < directionVector.length()) {
+                        crash = true;
+                        break;
+                    }
+                    crash = false;
+                }
+                if(crash){
+                    print(a[0]+":crashed")
+                }
+            }
+
+        }
+
+    </script>
+</body>
+
+</html>
